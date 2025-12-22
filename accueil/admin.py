@@ -1,3 +1,11 @@
 from django.contrib import admin
+from .models import Tache
 
-# Register your models here.
+
+@admin.register(Tache)
+class TacheAdmin(admin.ModelAdmin):
+	list_display = ("title", "done")
+	list_filter = ("done",)
+	search_fields = ("title",)
+	ordering = ("title",)
+

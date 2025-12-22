@@ -1,0 +1,50 @@
+/* style simple pour centrer la page et espacer les tâches */
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #f5f7fb;
+  color: #222;
+}
+
+.container {
+  max-width: 800px;
+  margin: 48px auto;
+  padding: 24px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(17, 24, 39, 0.06);
+  text-align: center;
+}
+
+h1 {
+  margin-top: 0;
+}
+
+ul.task-list {
+  list-style: none;
+  padding: 0;
+  margin: 20px 0;
+  text-align: left; /* aligner le texte des tâches à gauche */
+}
+
+ul.task-list li {
+  padding: 12px 14px;
+  border-bottom: 1px solid #eef2f6;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+ul.task-list li:last-child {
+  border-bottom: none;
+}
+
+ul.task-list li s {
+  color: #888;
+}
+
+.form-actions {
+  margin-top: 20px;
+}
