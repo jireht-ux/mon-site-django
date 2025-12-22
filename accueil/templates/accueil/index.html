@@ -8,6 +8,21 @@
     <h1>{{ message }}</h1>
     <p>Date du jour : {{ date_du_jour }}</p>
 
+    <h2>Liste de tâches</h2>
+    <ul>
+        {% for task in tasks %}
+            <li>
+                {% if task.done %}
+                    <s>{{ task.title }}</s>
+                {% else %}
+                    {{ task.title }}
+                {% endif %}
+            </li>
+        {% empty %}
+            <li>Aucune tâche.</li>
+        {% endfor %}
+    </ul>
+
     <form method="post">
         {% csrf_token %}
         {{ form.as_p }}
