@@ -2,6 +2,7 @@
 from django.shortcuts import render
 from datetime import date, datetime
 from .forms import NomForm
+from .models import Tache
 
 def index(request):
     message = "Salut et Bienvenue à tous sur mon super site Django !"
@@ -23,12 +24,13 @@ def index(request):
         else:
             message = "Bon après-midi !"
 
-    # Exemple simple de liste de tâches à passer au template
-    tasks = [
-        {'title': 'Apprendre Django', 'done': False},
-        {'title': 'Écrire des tests', 'done': True},
-        {'title': "Déployer l'application", 'done': False},
-    ]
+    # Récupérer toutes les tâches depuis la base, ordonnées par titre
+    try:
+        tasks = Tache.objects.order_by('title')
+    except Exception:
+        # Si ORM non disponible pour une raison quelconque (ex: migrations non appliquées),
+        # revenir à une liste vide pour éviter une erreur 500
+        tasks = []
 
     contexte = {
         'message': message,
