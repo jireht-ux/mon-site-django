@@ -13,6 +13,13 @@
         <p>Date du jour : {{ date_du_jour }}</p>
 
         <h2>Liste de tâches</h2>
+        <h3>Ajouter une tâche</h3>
+        <form method="post" action="{% url 'accueil:ajouter_tache' %}" class="form-actions">
+            {% csrf_token %}
+            {{ tache_form.as_p }}
+            <button type="submit">Ajouter</button>
+        </form>
+
         <ul class="task-list">
             {% for task in tasks %}
                 <li>
@@ -27,7 +34,7 @@
             {% endfor %}
         </ul>
 
-        <form method="post" class="form-actions">
+        <form method="post" action="{% url 'accueil:saluer' %}" class="form-actions">
             {% csrf_token %}
             {{ form.as_p }}
             <button type="submit">Envoyer</button>
