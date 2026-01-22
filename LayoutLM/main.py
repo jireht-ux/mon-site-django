@@ -100,7 +100,7 @@ def process_invoice(pdf_path):
 
 # --- EXECUTION ---
 try:
-    resultat = process_invoice("facture_2.pdf")
+    resultat = process_invoice("facture_24.pdf")
     print(json.dumps(resultat, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
