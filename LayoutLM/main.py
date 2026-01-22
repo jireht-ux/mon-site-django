@@ -1,10 +1,11 @@
-import fitz  # PyMuPDF
+import fitz
 from PIL import Image
 from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import torch
-from collections import defaultdict
+import json
+import re
 
-# 1. Chargement du processeur et du modèle
+# 1. Chargement (inchangé)
 processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 model = LayoutLMv3ForTokenClassification.from_pretrained("nielsr/layoutlmv3-finetuned-funsd")
 
@@ -16,15 +17,14 @@ def process_invoice(pdf_path):
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    words_data = page.get_text("words", sort=True) 
-    words = [w[4] for w in words_data]
+    # Correction : Tri manuel si ta version de PyMuPDF est ancienne
+    raw_words_data = page.get_text("words")
+    words_data = sorted(raw_words_data, key=lambda w: (w[1], w[0]))
     
-    # Coordonnées brutes pour le calcul des zones plus tard
+    words = [w[4] for w in words_data]
     raw_boxes = [[w[0], w[1], w[2], w[3]] for w in words_data]
     
-    # Normalisation 0-1000 pour LayoutLM
-    w_scale = 1000 / page.rect.width
-    h_scale = 1000 / page.rect.height
+    w_scale, h_scale = 1000 / page.rect.width, 1000 / page.rect.height
     normalized_boxes = [[int(b[0]*w_scale), int(b[1]*h_scale), int(b[2]*w_scale), int(b[3]*h_scale)] for b in raw_boxes]
 
     encoding = processor(img, words, boxes=normalized_boxes, return_tensors="pt")
@@ -32,77 +32,75 @@ def process_invoice(pdf_path):
     with torch.no_grad():
         outputs = model(**encoding)
     
-    # Récupération des prédictions
     predictions = outputs.logits.argmax(-1).squeeze().tolist()
-    labels = [model.config.id2label[p] for p in predictions]
-    
-    # --- LOGIQUE DE REGROUPEMENT ET GÉNÉRATION DCP_ZONES ---
-    detected_entities = []
-    dcp_zones_dynamic = {}
-    
-    current_entity = {"text": [], "label": None, "boxes": []}
+    # On gère le cas où LayoutLM crée plus de tokens que de mots (sub-tokens)
+    labels = [model.config.id2label[p] for p in predictions[:len(words)]]
 
-    print("\n--- ÉTIQUETTES DÉTECTÉES (CONSOLE) ---")
-    for word, label, raw_box in zip(words, labels, raw_boxes):
-        if label != "O":
-            print(f"TOKEN: {word:15} | LABEL: {label}")
-            
-            # Nettoyage du préfixe B- ou I- pour regrouper
-            clean_label = label.replace("B-", "").replace("I-", "")
-            
-            # Si c'est le début d'une nouvelle entité ou une entité différente
-            if label.startswith("B-") or clean_label != current_entity["label"]:
-                if current_entity["text"]:
-                    detected_entities.append(current_entity)
-                current_entity = {"text": [word], "label": clean_label, "boxes": [raw_box]}
+    # --- NOUVELLE LOGIQUE : PRÉPARATION DU CLUSTERING ---
+    tokens_with_info = []
+    for word, label, box in zip(words, labels, raw_boxes):
+        tokens_with_info.append({'text': word, 'label': label, 'bbox': box})
+
+    # FONCTION DE CLUSTERING (Distance-based)
+    def get_clusters(data, threshold_x=45, threshold_y=15):
+        clusters = []
+        if not data: return clusters
+        current_cluster = [data[0]]
+        for i in range(1, len(data)):
+            prev, curr = data[i-1]['bbox'], data[i]['bbox']
+            # Distance horizontale (fin du mot précédent -> début du mot actuel)
+            # Distance verticale (alignement des hauts de ligne)
+            if abs(curr[1] - prev[1]) < threshold_y and (curr[0] - prev[2]) < threshold_x:
+                current_cluster.append(data[i])
             else:
-                current_entity["text"].append(word)
-                current_entity["boxes"].append(raw_box)
-    
-    # Ajouter la dernière entité
-    if current_entity["text"]:
-        detected_entities.append(current_entity)
+                clusters.append(current_cluster)
+                current_cluster = [data[i]]
+        clusters.append(current_cluster)
+        return clusters
 
-    # --- CONSTRUCTION DU DCP_ZONES DYNAMIQUE ---
-    print("\n--- RÉSUMÉ DES DCP TROUVÉS ---")
-    page_width = page.rect.width
-    page_height = page.rect.height
+    clusters = get_clusters(tokens_with_info)
 
-    for i, entity in enumerate(detected_entities):
-        full_text = " ".join(entity["text"])
-        label = entity["label"]
-        
-        # Calcul de la zone englobante (min/max des boites de mots)
-        all_x = [b[0] for b in entity["boxes"]] + [b[2] for b in entity["boxes"]]
-        all_y = [b[1] for b in entity["boxes"]] + [b[3] for b in entity["boxes"]]
-        
-        # Coordonnées relatives (0.0 à 1.0) pour ton Optimizer
-        z_top = min(all_y) / page_height
-        z_bottom = max(all_y) / page_height
-        z_left = min(all_x) / page_width
-        z_right = max(all_x) / page_width
-        
-        # Remplissage du dictionnaire
-        zone_key = f"{label}_{i}"
-        dcp_zones_dynamic[zone_key] = {
-            "top": round(z_top, 3),
-            "bottom": round(z_bottom, 3),
-            "left": round(z_left, 3),
-            "right": round(z_right, 3),
-            "content": full_text
-        }
-        
-        print(f"[{label}] : {full_text}")
+    # --- ANALYSE DES BLOCS (VOTE MAJORITAIRE ET RAFFINAGE) ---
+    final_zones = {}
+    page_w, page_h = page.rect.width, page.rect.height
 
-    return dcp_zones_dynamic
+    for i, cluster in enumerate(clusters):
+        # 1. Texte et Label dominant
+        full_text = " ".join([w['text'] for w in cluster])
+        cluster_labels = [w['label'].replace("B-","").replace("I-","") for w in cluster if w['label'] != "O"]
+        
+        # Si le bloc contient des prédictions IA, on prend la plus fréquente, sinon "O"
+        main_label = max(set(cluster_labels), key=cluster_labels.count) if cluster_labels else "O"
+        
+        # 2. Coordonnées du bloc (Boîte englobante)
+        x0 = min([w['bbox'][0] for w in cluster])
+        y0 = min([w['bbox'][1] for w in cluster])
+        x1 = max([w['bbox'][2] for w in cluster])
+        y1 = max([w['bbox'][3] for w in cluster])
 
-# --- TEST -
-# Assure-toi d'avoir un fichier 'facture.pdf' dans le dossier
+        # 3. Raffinage par Regex (DCP)
+        # On peut forcer un label si une Regex trouve une info critique
+        if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', full_text):
+            main_label = "CONTACT_EMAIL"
+        elif re.search(r'SARL|SAS|EURL|SA ', full_text):
+            main_label = "SOCIETE_EMETTEUR"
+
+        # 4. Stockage si le bloc est utile
+        if main_label != "O" or "SARL" in full_text:
+            zone_key = f"{main_label}_{i}"
+            final_zones[zone_key] = {
+                "top": round(y0 / page_h, 3),
+                "bottom": round(y1 / page_h, 3),
+                "left": round(x0 / page_w, 3),
+                "right": round(x1 / page_w, 3),
+                "content": full_text
+            }
+
+    return final_zones
+
+# --- EXECUTION ---
 try:
-    result_zones = process_invoice("facture_2.pdf")
-    
-    print("\n--- DICTIONNAIRE DCP_ZONES GÉNÉRÉ ---")
-    import json
-    print(json.dumps(result_zones, indent=4, ensure_ascii=False))
+    resultat = process_invoice("facture_2.pdf")
+    print(json.dumps(resultat, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
