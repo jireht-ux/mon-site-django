@@ -140,7 +140,7 @@ def generate_dcp_report(structured_clusters):
     return dcp_zones
 
 # --- EXECUTION ---
-pdf_a_tester = "facture_24.pdf"
+pdf_a_tester = "facture_2.pdf"
 
 try:
     # 1. Extraction des blocs par IA + Clustering
