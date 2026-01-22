@@ -27,6 +27,7 @@ def process_invoice(pdf_path):
     
     raw_words_data = page.get_text("words")
     if not raw_words_data: return []
+    # Tri spatial initial : haut en bas, puis gauche à droite
     words_data = sorted(raw_words_data, key=lambda w: (w[1], w[0]))
     
     words = [w[4] for w in words_data]
@@ -78,48 +79,60 @@ def process_invoice(pdf_path):
     return structured_blocks
 
 def generate_dcp_report(blocks):
-    """Fusionne les ancres libellés/montants (Horizontal + Vertical) et génère le rapport."""
+    """Fusionne libellés/valeurs avec priorité horizontale puis verticale."""
     if not blocks: return {}
 
     merged = []
     skip = set()
-    # Ajout de mots-clés d'ancres plus larges
     anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT", "FACTURE"]
     
-    # Tri par axe vertical pour l'analyse descendante
-    sorted_blocks = sorted(blocks, key=lambda b: b['top'])
+    # Tri strict pour le balayage
+    sorted_blocks = sorted(blocks, key=lambda b: (b['top'], b['left']))
 
     for i in range(len(sorted_blocks)):
         if i in skip: continue
         curr = sorted_blocks[i]
         content_up = curr['content'].upper()
         
-        # Si le bloc contient une ancre (ex: "Facture N°")
         if any(key in content_up for key in anchor_keywords):
+            # Priorité 1 : Recherche HORIZONTALE
+            found_h = False
             for j in range(i + 1, len(sorted_blocks)):
                 if j in skip: continue
                 cand = sorted_blocks[j]
                 
-                # --- OPTION 1 : LIAISON HORIZONTALE (Même ligne, à droite) ---
                 same_line = abs(curr['top'] - cand['top']) < 0.015
                 is_at_right = cand['left'] > curr['left']
                 
-                # --- OPTION 2 : LIAISON VERTICALE (Juste en dessous, aligné) ---
-                # On tolère un écart de 3.5% de la page vers le bas
-                is_below = 0 < (cand['top'] - curr['bottom']) < 0.035
-                # On vérifie que les blocs sont à peu près alignés à gauche ou centrés
-                is_aligned_x = abs(curr['left'] - cand['left']) < 0.06
-
-                if (same_line and is_at_right) or (is_below and is_aligned_x):
+                if same_line and is_at_right:
                     curr['content'] += f" : {cand['content']}"
                     curr['right'] = max(curr['right'], cand['right'])
-                    curr['bottom'] = max(curr['bottom'], cand['bottom'])
                     skip.add(j)
-                    break # On stoppe à la première valeur trouvée
+                    found_h = True
+                    break 
+            
+            # Priorité 2 : Recherche VERTICALE (si rien trouvé à droite)
+            if not found_h:
+                for j in range(i + 1, len(sorted_blocks)):
+                    if j in skip: continue
+                    cand = sorted_blocks[j]
+                    
+                    # Espace vertical max 4% et alignement horizontal par les centres
+                    is_below = 0 <= (cand['top'] - curr['bottom']) < 0.04
+                    curr_mid_x = (curr['left'] + curr['right']) / 2
+                    cand_mid_x = (cand['left'] + cand['right']) / 2
+                    is_aligned = abs(curr_mid_x - cand_mid_x) < 0.12 # Tolérance centre
+                    
+                    if is_below and is_aligned:
+                        curr['content'] += f" : {cand['content']}"
+                        curr['bottom'] = max(curr['bottom'], cand['bottom'])
+                        curr['right'] = max(curr['right'], cand['right'])
+                        skip.add(j)
+                        break
         
         merged.append(curr)
 
-    # 2. Audit des DCP
+    # 2. Audit des DCP (Données Sensibles)
     dcp_zones = {}
     patterns = {
         "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
@@ -139,7 +152,7 @@ def generate_dcp_report(blocks):
                 is_sensitive = True
                 break
         
-        if "SARL" in content.upper() or "SAS" in content.upper():
+        if any(kw in content.upper() for kw in ["SARL", "SAS", "ETABLISSEMENT"]):
             final_label = "SOCIETE_EMETTEUR"
         
         if "CLIENT" in content.upper() or is_sensitive:
@@ -157,6 +170,7 @@ def generate_dcp_report(blocks):
 
 # --- EXECUTION ---
 try:
+    # Remplacez par le nom de votre fichier
     raw_blocks = process_invoice("facture_23.pdf")
     dcp_report = generate_dcp_report(raw_blocks)
     print(json.dumps(dcp_report, indent=4, ensure_ascii=False))
