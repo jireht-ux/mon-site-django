@@ -93,7 +93,7 @@ def generate_dcp_report(blocks):
     # On cherche des mots clés financiers et on scanne la ligne à droite
     merged = []
     skip = set()
-    anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT"]
+    anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT","FACTURE N°"]
     
     # Tri par axe vertical pour le balayage par ligne
     sorted_blocks = sorted(blocks, key=lambda b: b['top'])
