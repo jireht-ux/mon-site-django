@@ -16,7 +16,7 @@ def process_invoice(pdf_path):
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    words_data = page.get_text("words") 
+    words_data = page.get_text("words", sort=True) 
     words = [w[4] for w in words_data]
     
     # Coordonnées brutes pour le calcul des zones plus tard
@@ -99,7 +99,7 @@ def process_invoice(pdf_path):
 # --- TEST -
 # Assure-toi d'avoir un fichier 'facture.pdf' dans le dossier
 try:
-    result_zones = process_invoice("facture_2.pdf")
+    result_zones = process_invoice("facture_23.pdf")
     
     print("\n--- DICTIONNAIRE DCP_ZONES GÉNÉRÉ ---")
     import json
