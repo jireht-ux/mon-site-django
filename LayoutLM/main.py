@@ -99,7 +99,7 @@ def process_invoice(pdf_path):
 # --- TEST -
 # Assure-toi d'avoir un fichier 'facture.pdf' dans le dossier
 try:
-    result_zones = process_invoice("facture.pdf")
+    result_zones = process_invoice("facture_2.pdf")
     
     print("\n--- DICTIONNAIRE DCP_ZONES GÉNÉRÉ ---")
     import json
