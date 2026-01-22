@@ -98,9 +98,61 @@ def process_invoice(pdf_path):
 
     return final_zones
 
+def generate_dcp_report(structured_clusters):
+    """
+    Analyse les blocs structurés pour créer le dictionnaire final DCP_ZONES
+    en isolant les types de données via Regex.
+    """
+    dcp_zones = {}
+    
+    # Patterns pour l'identification fine
+    patterns = {
+        "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+        "PHONE": r'(?:\+237|237)?\s*[2368]\s*[0-9](?:\s*[0-9]{2}){3}',
+        "SIRET": r'\d{14}',
+        "TVA": r'[A-Z]{2}\d{11}'
+    }
+
+    for i, cluster in enumerate(structured_clusters):
+        content = cluster['content']
+        label_ia = cluster['label_IA']
+        
+        # Détermination du type de zone final
+        final_type = label_ia
+        
+        # Raffinement stratégique : si une Regex match, on précise le label
+        for dcp_name, pattern in patterns.items():
+            if re.search(pattern, content):
+                final_type = f"ZONE_{dcp_name}"
+                break # On prend le premier type de DCP trouvé comme label de zone
+        
+        # Construction de l'entrée du dictionnaire
+        zone_id = f"{final_type}_{i}"
+        dcp_zones[zone_id] = {
+            "top": cluster['top'],
+            "bottom": cluster['bottom'],
+            "left": cluster['left'],
+            "right": cluster['right'],
+            "content": content,
+            "is_sensitive": any(re.search(p, content) for p in patterns.values()) or "CLIENT" in content.upper()
+        }
+        
+    return dcp_zones
+
+# --- DANS TON FLUX PRINCIPAL ---
+# 1. Tu récupères tes clusters structurés (ceux de ton étape précédente)
+# clusters_data = process_invoice("facture_2.pdf") 
+
+
 # --- EXECUTION ---
 try:
     resultat = process_invoice("facture_24.pdf")
     print(json.dumps(resultat, indent=4, ensure_ascii=False))
+
+
+    # 2. Tu génères le dictionnaire final
+    dcp_zones_final = generate_dcp_report(resultat)
+
+    print(json.dumps(dcp_zones_final, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
