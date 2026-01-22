@@ -99,10 +99,10 @@ def process_invoice(pdf_path):
 # --- TEST -
 # Assure-toi d'avoir un fichier 'facture.pdf' dans le dossier
 try:
-    result_zones = process_invoice("facture_23.pdf")
+    result_zones = process_invoice("facture_2.pdf")
     
     print("\n--- DICTIONNAIRE DCP_ZONES GÉNÉRÉ ---")
     import json
-    print(json.dumps(result_zones, indent=4))
+    print(json.dumps(result_zones, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
