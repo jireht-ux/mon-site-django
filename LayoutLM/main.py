@@ -168,7 +168,7 @@ def generate_dcp_report(blocks):
 # --- EXECUTION ---
 try:
     # Analyse IA + Clustering
-    raw_blocks = process_invoice("facture_24.pdf")
+    raw_blocks = process_invoice("facture_FAC-2025-00001_2.pdf")
     
     # Audit final avec méthode d'ancrage
     dcp_report = generate_dcp_report(raw_blocks)
