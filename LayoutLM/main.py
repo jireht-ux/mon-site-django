@@ -77,34 +77,37 @@ def process_invoice(pdf_path):
 
     return structured_blocks
 
-def cluster_macro_zones(blocks, v_threshold=0.06):
+def cluster_macro_zones(blocks, v_threshold=0.035, h_threshold=0.25):
     """
-    Regroupe les blocs fusionnés en Macro-Zones sémantiques basées sur la proximité.
+    Regroupe les blocs avec une sensibilité accrue pour éviter la fusion globale.
     """
     macro_zones = []
-    # Tri par axe vertical pour regrouper les paragraphes
+    if not blocks: return []
+    
+    # Tri par axe vertical
     sorted_blocks = sorted(blocks, key=lambda b: b['top'])
     
-    if not sorted_blocks: return []
-
     current_zone = [sorted_blocks[0]]
     
     for i in range(1, len(sorted_blocks)):
         prev = current_zone[-1]
         curr = sorted_blocks[i]
         
-        # Calcul de la distance verticale entre le bas du bloc précédent et le haut du suivant
+        # 1. Calcul de l'écart vertical
         dist_y = curr['top'] - prev['bottom']
-        # Calcul de l'alignement horizontal (si les blocs partagent une zone commune sur X)
-        overlap_x = min(prev['right'], curr['right']) - max(prev['left'], curr['left'])
         
-        # Si les blocs sont proches verticalement et alignés, ils font partie du même paragraphe/zone
-        if dist_y < v_threshold and (overlap_x > -0.05):
+        # 2. Calcul de l'écart horizontal entre les bords gauches
+        # Si le nouveau bloc fait un "saut" horizontal trop grand, c'est une nouvelle zone
+        dist_x = abs(curr['left'] - prev['left'])
+        
+        # LOGIQUE DE RUPTURE :
+        # On coupe si l'espace vertical est > 3.5% OU si l'écart horizontal est > 25%
+        if dist_y < v_threshold and dist_x < h_threshold:
             current_zone.append(curr)
         else:
             macro_zones.append(current_zone)
             current_zone = [curr]
-    
+            
     macro_zones.append(current_zone)
     return macro_zones
 
