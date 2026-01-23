@@ -4,18 +4,16 @@ from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import torch
 import json
 
-# 1. Initialisation
 processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 model = LayoutLMv3ForTokenClassification.from_pretrained("nielsr/layoutlmv3-finetuned-funsd")
 
-def process_hybrid_invoice_final(pdf_path):
+def process_hybrid_invoice_v6(pdf_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
     page_w, page_h = page.rect.width, page.rect.height
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # 2. Extraction des segments
     segments = []
     blocks_raw = page.get_text("dict")["blocks"]
     for b in blocks_raw:
@@ -31,7 +29,7 @@ def process_hybrid_invoice_final(pdf_path):
                     "assigned": False
                 })
 
-    # 3. Prédiction LayoutLMv3
+    # IA Prediction
     words = [s["content"] for s in segments]
     boxes = [[max(0, min(1000, int(s["bbox"][0] * (1000/page_w)))),
               max(0, min(1000, int(s["bbox"][1] * (1000/page_h)))),
@@ -46,7 +44,7 @@ def process_hybrid_invoice_final(pdf_path):
     for i, p_idx in enumerate(predictions[:len(segments)]):
         segments[i]["label_ia"] = model.config.id2label[p_idx].replace("B-","").replace("I-","")
 
-    # 4. Clustering Intelligent
+    # --- LOGIQUE DE REGROUPEMENT AVANCÉE ---
     macro_clusters = []
     available_segments = sorted(segments, key=lambda x: (x["bbox"][1], x["bbox"][0]))
     
@@ -64,20 +62,24 @@ def process_hybrid_invoice_final(pdf_path):
                     v_gap = other["bbox"][1] - member["bbox"][3]
                     h_gap = max(0, other["bbox"][0] - member["bbox"][2], member["bbox"][0] - other["bbox"][2])
                     
-                    content_all = (member["content"] + " " + other["content"]).upper()
-                    
-                    # RÈGLE 1 : Métadonnées En-tête (Date, Échéance) -> Fusion Verticale
-                    if any(k in content_all for k in ["DATE", "ÉCHÉANCE", "N°"]):
-                        if abs(other["bbox"][0] - member["bbox"][0]) < 20 and v_gap < 15:
+                    # 1. REGROUPEMENT VERTICAL (Date, Échéance, Header)
+                    # Si alignés approximativement sur la gauche ou la droite et très proches verticalement
+                    is_metadata = any(k in (member["content"] + other["content"]).upper() for k in ["DATE", "ÉCHÉANCE", "FACTURE"])
+                    if is_metadata:
+                        # Tolérance d'alignement X de 50px pour capturer Date et Échéance même si décalés
+                        if abs(other["bbox"][0] - member["bbox"][0]) < 50 and v_gap < 15:
                             is_close = True
                     
-                    # RÈGLE 2 : Totaux (TVA, TTC, HT) -> Fusion Horizontale Large
-                    elif any(k in content_all for k in ["TVA", "TOTAL", "TTC", "HT"]):
-                        if v_dist < 10 and h_gap < 250: # On accepte un grand vide horizontal pour lier libellé et montant
+                    # 2. REGROUPEMENT HORIZONTAL LARGE (Sous-total, TVA, Total)
+                    # Si c'est un mot-clé financier, on cherche la valeur très loin à droite
+                    is_financial = any(k in (member["content"] + other["content"]).upper() for k in ["TVA", "TOTAL", "HT", "TTC"])
+                    if is_financial:
+                        # Si sur la même ligne (v_dist < 10) on accepte un gap de 400px (largeur de page)
+                        if v_dist < 10 and h_gap < 450:
                             is_close = True
-                    
-                    # RÈGLE 3 : Blocs de texte standard (Adresses, etc.)
-                    elif v_gap < 12 and h_gap < 60:
+                            
+                    # 3. BLOCS STANDARD (Adresses, Description)
+                    if not is_close and v_gap < 12 and h_gap < 60:
                         is_close = True
 
                     if is_close: break
@@ -88,10 +90,11 @@ def process_hybrid_invoice_final(pdf_path):
                     added = True
         macro_clusters.append(cluster)
 
-    # 5. Génération du rapport
+    # 5. Finalisation du Rapport
     final_report = {}
     for idx, cluster in enumerate(macro_clusters):
-        sorted_cluster = sorted(cluster, key=lambda x: (round(x["bbox"][1], 1), x["bbox"][0]))
+        # Tri interne : par ligne puis par colonne
+        sorted_cluster = sorted(cluster, key=lambda x: (round(x["bbox"][1] / 5) * 5, x["bbox"][0]))
         content = " ".join([c["content"] for c in sorted_cluster])
         
         b = [min(c["bbox"][0] for c in cluster), min(c["bbox"][1] for c in cluster),
@@ -109,4 +112,4 @@ def process_hybrid_invoice_final(pdf_path):
         }
     return final_report
 
-print(json.dumps(process_hybrid_invoice_final("facture_2.pdf"), indent=4, ensure_ascii=False))
+print(json.dumps(process_hybrid_invoice_v6("facture_2.pdf"), indent=4, ensure_ascii=False))
