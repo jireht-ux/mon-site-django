@@ -67,69 +67,89 @@ def process_invoice(pdf_path):
     return structured_blocks
 
 def generate_dcp_report(blocks):
-    """Fusion bidirectionnelle conventionnelle (Anchor -> Value)"""
+    """Version stable : une ancre ne fusionne qu'avec sa valeur immédiate."""
     if not blocks: return {}
+
     merged = []
     skip = set()
     anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT", "FACTURE"]
+    
+    # Tri spatial strict
     sorted_blocks = sorted(blocks, key=lambda b: (b['top'], b['left']))
 
     for i in range(len(sorted_blocks)):
         if i in skip: continue
-        curr = sorted_blocks[i].copy()
+        
+        # On fait une copie pour ne pas polluer la boucle avec un bloc qui grandit
+        curr = dict(sorted_blocks[i])
         content_up = curr['content'].upper()
         
-        # Tentative de fusion seulement pour les ancres
+        # Tentative de fusion seulement si c'est une ancre
         if any(key in content_up for key in anchor_keywords):
-            found_val = False
-            # 1. Horizontal
+            target_idx = -1
+            
+            # --- 1. RECHERCHE HORIZONTALE (Priorité 1) ---
             for j in range(i + 1, len(sorted_blocks)):
                 if j in skip: continue
                 cand = sorted_blocks[j]
-                if abs(curr['top'] - cand['top']) < 0.015 and cand['left'] > curr['left']:
-                    curr['content'] += f" : {cand['content']}"
-                    curr['right'] = max(curr['right'], cand['right'])
-                    skip.add(j)
-                    found_val = True
-                    break 
-            # 2. Vertical (si non trouvé à droite)
-            if not found_val:
+                # Même ligne (tolérance 1.2%) et à droite
+                if abs(curr['top'] - cand['top']) < 0.012 and cand['left'] > curr['left']:
+                    target_idx = j
+                    break # On stoppe au premier voisin de droite
+            
+            # --- 2. RECHERCHE VERTICALE (Priorité 2, si rien à droite) ---
+            if target_idx == -1:
                 for j in range(i + 1, len(sorted_blocks)):
                     if j in skip: continue
                     cand = sorted_blocks[j]
-                    is_below = 0 <= (cand['top'] - curr['bottom']) < 0.035
-                    is_aligned = abs(curr['left'] - cand['left']) < 0.08
+                    # Juste en dessous (tolérance 3%) et aligné horizontalement
+                    is_below = 0 <= (cand['top'] - curr['bottom']) < 0.03
+                    is_aligned = abs(curr['left'] - cand['left']) < 0.06
                     if is_below and is_aligned:
-                        curr['content'] += f" : {cand['content']}"
-                        curr['bottom'] = max(curr['bottom'], cand['bottom'])
-                        skip.add(j)
-                        break
+                        target_idx = j
+                        break # On stoppe au premier voisin du dessous
+
+            # --- APPLICATION DE LA FUSION UNIQUE ---
+            if target_idx != -1:
+                val_block = sorted_blocks[target_idx]
+                curr['content'] += f" : {val_block['content']}"
+                curr['right'] = max(curr['right'], val_block['right'])
+                curr['bottom'] = max(curr['bottom'], val_block['bottom'])
+                skip.add(target_idx)
+
         merged.append(curr)
 
-    # Filtrage final des DCP
-    dcp_zones = {}
-    patterns = {"EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', "PHONE": r'(?:\+237|237)?\s*[2368]\s*[0-9](?:\s*[0-9]{2}){3}'}
+    # 3. FILTRAGE ET AUDIT DES DCP
+    dcp_report = {}
+    patterns = {
+        "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+        "PHONE": r'(?:\+237|237)?\s*[2368]\s*[0-9](?:\s*[0-9]{2}){3}',
+        "SIRET": r'\d{14}',
+        "TVA": r'[A-Z]{2}\d{11}'
+    }
 
     for i, block in enumerate(merged):
         content = block['content']
+        label = block['label_IA']
         is_sensitive = False
-        final_label = block['label_IA']
 
         for d_name, p in patterns.items():
             if re.search(p, content):
-                final_label, is_sensitive = f"ZONE_{d_name}", True
+                label, is_sensitive = f"ZONE_{d_name}", True
         
-        if any(kw in content.upper() for kw in ["SARL", "SAS", "ETABLISSEMENT"]): final_label = "SOCIETE_EMETTEUR"
-        if "CLIENT" in content.upper() or is_sensitive: is_sensitive = True
+        if any(kw in content.upper() for kw in ["SARL", "SAS", "ETABLISSEMENT"]):
+            label = "SOCIETE_EMETTEUR"
+        
+        if "CLIENT" in content.upper() or is_sensitive:
+            is_sensitive = True
 
-        if final_label != "O" or is_sensitive:
-            dcp_zones[f"{final_label}_{i}"] = {
+        if label != "O" or is_sensitive:
+            dcp_report[f"{label}_{i}"] = {
                 "top": block['top'], "bottom": block['bottom'],
                 "left": block['left'], "right": block['right'],
                 "content": content, "is_sensitive": is_sensitive
             }
-    return dcp_zones
-
+    return dcp_report
 # --- TEST ---
 try:
     raw_blocks = process_invoice("facture_2.pdf")
