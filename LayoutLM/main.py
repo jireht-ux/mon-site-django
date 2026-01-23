@@ -4,18 +4,19 @@ from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import torch
 import json
 
-# 1. Initialisation
 processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 model = LayoutLMv3ForTokenClassification.from_pretrained("nielsr/layoutlmv3-finetuned-funsd")
 
 def process_hybrid_invoice_v4(pdf_path):
     doc = fitz.open(pdf_path)
+    if doc.page_count == 0:
+        return {"error": "Document vide"}
+        
     page = doc[0]
     page_w, page_h = page.rect.width, page.rect.height
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # 2. Extraction
     segments = []
     blocks_raw = page.get_text("dict")["blocks"]
     for b in blocks_raw:
@@ -31,7 +32,6 @@ def process_hybrid_invoice_v4(pdf_path):
                     "assigned": False
                 })
 
-    # 3. IA
     words = [s["content"] for s in segments]
     boxes = [[max(0, min(1000, int(s["bbox"][0] * (1000/page_w)))),
               max(0, min(1000, int(s["bbox"][1] * (1000/page_h)))),
@@ -46,15 +46,9 @@ def process_hybrid_invoice_v4(pdf_path):
     for i, p_idx in enumerate(predictions[:len(segments)]):
         segments[i]["label_ia"] = model.config.id2label[p_idx].replace("B-","").replace("I-","")
 
-    # --- NOUVELLE STRATÉGIE DE REGROUPEMENT ---
-
-    # 4. Étape A : On lie d'abord Clé-Valeur SANS les retirer de la liste globale
-    # On crée juste des liens logiques pour ne pas perdre la donnée
-    keywords = ["TVA", "TOTAL", "TTC", "HT", "FACTURE", "DATE", "ÉCHÉANCE", "N°", "SIRET"]
-    
-    # 5. Étape B : Clustering Spatial pur (respecte l'ordre de lecture)
+    # --- STRATÉGIE DE REGROUPEMENT AJUSTÉE ---
     macro_clusters = []
-    available_segments = sorted(segments, key=lambda x: (x["bbox"][1], x["bbox"][0])) # Tri lecture naturelle
+    available_segments = sorted(segments, key=lambda x: (x["bbox"][1], x["bbox"][0]))
     
     while available_segments:
         current = available_segments.pop(0)
@@ -65,14 +59,23 @@ def process_hybrid_invoice_v4(pdf_path):
         while added:
             added = False
             for other in list(available_segments):
-                # On cherche si 'other' est proche de N'IMPORTE QUEL élément déjà dans le cluster
                 is_close = False
                 for member in cluster:
-                    v_dist = abs(other["bbox"][1] - member["bbox"][3]) # Distance verticale
-                    h_overlap = not (other["bbox"][2] < member["bbox"][0] or other["bbox"][0] > member["bbox"][2])
+                    # Distance verticale
+                    v_dist = abs(other["bbox"][1] - member["bbox"][1])
+                    v_gap = other["bbox"][1] - member["bbox"][3]
+                    # Distance horizontale (espace vide entre les deux blocks)
+                    h_gap = max(0, other["bbox"][0] - member["bbox"][2], member["bbox"][0] - other["bbox"][2])
                     
-                    # Si c'est sur la même ligne ou juste en dessous
-                    if abs(other["bbox"][1] - member["bbox"][1]) < 10 or (0 < other["bbox"][1] - member["bbox"][3] < 15):
+                    # CONDITION 1: Même ligne MAIS proche horizontalement (< 50px)
+                    # Cela sépare SCT.TEST-TEST de FACTURE N°
+                    same_line_close = (v_dist < 8) and (h_gap < 50)
+                    
+                    # CONDITION 2: Juste en dessous et aligné (Bloc Facture N° + Numéro)
+                    # v_gap < 15 permet de souder FACTURE N° avec FAC-2025...
+                    just_below_aligned = (0 < v_gap < 15) and (abs(other["bbox"][0] - member["bbox"][0]) < 50)
+                    
+                    if same_line_close or just_below_aligned:
                         is_close = True
                         break
                 
@@ -84,13 +87,9 @@ def process_hybrid_invoice_v4(pdf_path):
         
         macro_clusters.append(cluster)
 
-    # 6. Génération du Rapport avec TRI INTERNE
     final_report = {}
     for idx, cluster in enumerate(macro_clusters):
-        # IMPORTANT : On trie les éléments du cluster par Y (top) puis X (left)
-        # Cela garantit que "ALI SARL" (top: 0.076, left: 0.10) passe avant "FACTURE N°" (top: 0.076, left: 0.58)
         sorted_cluster = sorted(cluster, key=lambda x: (round(x["bbox"][1]), x["bbox"][0]))
-        
         content = " ".join([c["content"] for c in sorted_cluster])
         
         min_x = min(c["bbox"][0] for c in sorted_cluster)
@@ -98,7 +97,7 @@ def process_hybrid_invoice_v4(pdf_path):
         max_x = max(c["bbox"][2] for c in sorted_cluster)
         max_y = max(c["bbox"][3] for c in sorted_cluster)
         
-        label = cluster[0]["label_ia"] if cluster[0]["label_ia"] != "O" else "ZONE"
+        label = sorted_cluster[0]["label_ia"] if sorted_cluster[0]["label_ia"] != "O" else "ZONE"
         
         final_report[f"{label}_{idx}"] = {
             "content": content,
@@ -111,5 +110,4 @@ def process_hybrid_invoice_v4(pdf_path):
 
     return final_report
 
-# Exécution
-print(json.dumps(process_hybrid_invoice_v4("facture_24.pdf"), indent=4, ensure_ascii=False))
+print(json.dumps(process_hybrid_invoice_v4("facture_2.pdf"), indent=4, ensure_ascii=False))
