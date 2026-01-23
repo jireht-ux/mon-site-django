@@ -132,7 +132,7 @@ def process_hybrid_invoice(pdf_path):
 
 # --- EXECUTION ---
 try:
-    report = process_hybrid_invoice("facture_FAC-2025-00001_2.pdf")
+    report = process_hybrid_invoice("facture_2.pdf")
     print(json.dumps(report, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
