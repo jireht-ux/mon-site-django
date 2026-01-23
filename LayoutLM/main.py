@@ -112,4 +112,4 @@ def process_hybrid_invoice_v4(pdf_path):
     return final_report
 
 # Exécution
-print(json.dumps(process_hybrid_invoice_v4("Copy of modeles-de-factures-excel-1and1.pdf"), indent=4, ensure_ascii=False))
+print(json.dumps(process_hybrid_invoice_v4("CP5.O1-facture.pdf"), indent=4, ensure_ascii=False))
