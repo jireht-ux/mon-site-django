@@ -151,7 +151,7 @@ def generate_dcp_report(blocks):
 
 # --- TEST ---
 try:
-    raw_blocks = process_invoice("facture_23.pdf")
+    raw_blocks = process_invoice("facture_FAC-2025-00001_2.pdf")
     dcp_report = generate_dcp_report(raw_blocks)
     print(json.dumps(dcp_report, indent=4, ensure_ascii=False))
 except Exception as e:
