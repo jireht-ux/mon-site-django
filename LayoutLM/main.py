@@ -128,5 +128,6 @@ if __name__ == "__main__":
         raw_blocks = process_invoice("facture_2.pdf")
         final_report = generate_dcp_report(raw_blocks)
         print(json.dumps(final_report, indent=4, ensure_ascii=False))
+        print(f"test final Total zones extraites : {len(final_report)}")
     except Exception as e:
         print(f"Erreur : {e}")
