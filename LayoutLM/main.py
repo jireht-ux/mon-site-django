@@ -17,140 +17,122 @@ def process_invoice(pdf_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
     page_w, page_h = page.rect.width, page.rect.height
-    
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
+    # Extraction brute des mots
     raw_words_data = page.get_text("words")
     if not raw_words_data: return []
 
+    # TRI PAR LIGNE STRICT (Tolérance 3 pixels)
+    # On trie d'abord par Y, puis par X
     words_data = sorted(raw_words_data, key=lambda w: (w[1], w[0]))
     
-    words = [w[4] for w in words_data]
-    raw_boxes = [[w[0], w[1], w[2], w[3]] for w in words_data]
-    
-    w_scale, h_scale = 1000 / page_w, 1000 / page_h
-    
-    # --- CORRECTION ICI : Clipping entre 0 et 1000 ---
-    normalized_boxes = []
-    for b in raw_boxes:
-        normalized_boxes.append([
-            max(0, min(1000, int(b[0] * w_scale))),
-            max(0, min(1000, int(b[1] * h_scale))),
-            max(0, min(1000, int(b[2] * w_scale))),
-            max(0, min(1000, int(b[3] * h_scale)))
-        ])
+    # Reconstruction des lignes physiques
+    lines = []
+    if words_data:
+        current_line = [words_data[0]]
+        for i in range(1, len(words_data)):
+            prev_w = words_data[i-1]
+            curr_w = words_data[i]
+            # Si l'écart vertical est > 3px, c'est une nouvelle ligne
+            if abs(curr_w[1] - prev_w[1]) > 3:
+                lines.append(current_line)
+                current_line = [curr_w]
+            else:
+                current_line.append(curr_w)
+        lines.append(current_line)
 
-    encoding = processor(img, words, boxes=normalized_boxes, return_tensors="pt")
+    # Préparation pour LayoutLMv3
+    all_words = []
+    all_boxes = []
+    for line in lines:
+        for w in line:
+            all_words.append(w[4])
+            all_boxes.append([w[0], w[1], w[2], w[3]])
+
+    # Normalisation 0-1000 sécurisée
+    w_scale, h_scale = 1000 / page_w, 1000 / page_h
+    normalized_boxes = [[max(0, min(1000, int(b[0]*w_scale))), max(0, min(1000, int(b[1]*h_scale))),
+                         max(0, min(1000, int(b[2]*w_scale))), max(0, min(1000, int(b[3]*h_scale)))] for b in all_boxes]
+
+    # Inférence IA
+    encoding = processor(img, all_words, boxes=normalized_boxes, return_tensors="pt")
     with torch.no_grad():
         outputs = model(**encoding)
     
     predictions = outputs.logits.argmax(-1).squeeze().tolist()
-    labels = [model.config.id2label[p] for p in predictions[:len(words)]]
+    labels = [model.config.id2label[p] for p in predictions[:len(all_words)]]
 
-    tokens_info = [{'text': t, 'label': l, 'bbox': b} for t, l, b in zip(words, labels, raw_boxes)]
-    
-    # --- AJUSTEMENT SEUILS : On réduit pour éviter le bloc unique ---
-    def get_clusters(data, threshold_x=20, threshold_y=5):
-        clusters = []
-        if not data: return clusters
-        curr_cluster = [data[0]]
-        for i in range(1, len(data)):
-            prev, curr = data[i-1]['bbox'], data[i]['bbox']
-            # Si même ligne (Y proche) et horizontalement proche
-            if abs(curr[1] - prev[1]) < threshold_y and (curr[0] - prev[2]) < threshold_x:
-                curr_cluster.append(data[i])
-            else:
-                clusters.append(curr_cluster)
-                curr_cluster = [data[i]]
-        clusters.append(curr_cluster)
-        return clusters
-
-    raw_clusters = get_clusters(tokens_info)
+    # Création des blocs finaux (un par segment de ligne)
     structured_blocks = []
+    for line in lines:
+        # On peut encore découper horizontalement si l'espace est grand (>40px)
+        line = sorted(line, key=lambda w: w[0])
+        temp_cluster = [line[0]]
+        for i in range(1, len(line)):
+            if (line[i][0] - line[i-1][2]) > 40:
+                structured_blocks.append(temp_cluster)
+                temp_cluster = [line[i]]
+            else:
+                temp_cluster.append(line[i])
+        structured_blocks.append(temp_cluster)
 
-    for cluster in raw_clusters:
-        full_text = " ".join([w['text'] for w in cluster])
-        clean_labels = [w['label'].replace("B-","").replace("I-","") for w in cluster if w['label'] != "O"]
-        main_label = max(set(clean_labels), key=clean_labels.count) if clean_labels else "O"
-        
-        structured_blocks.append({
-            "label_IA": main_label,
-            "top": round(min(w['bbox'][1] for w in cluster) / page_h, 3),
-            "bottom": round(max(w['bbox'][3] for w in cluster) / page_h, 3),
-            "left": round(min(w['bbox'][0] for w in cluster) / page_w, 3),
-            "right": round(max(w['bbox'][2] for w in cluster) / page_w, 3),
-            "content": full_text
+    final_blocks = []
+    for cluster in structured_blocks:
+        content = " ".join([w[4] for w in cluster])
+        final_blocks.append({
+            "top": round(min(w[1] for w in cluster) / page_h, 3),
+            "bottom": round(max(w[3] for w in cluster) / page_h, 3),
+            "left": round(min(w[0] for w in cluster) / page_w, 3),
+            "right": round(max(w[2] for w in cluster) / page_w, 3),
+            "content": content,
+            "label_IA": "O" # Label par défaut, sera affiné par motifs
         })
 
-    return structured_blocks
+    return final_blocks
 
 def generate_dcp_report(blocks):
     if not blocks: return {}
-
-    merged = []
-    skip = set()
-    anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT", "FACTURE"]
     
-    sorted_blocks = sorted(blocks, key=lambda b: (b['top'], b['left']))
-
-    for i in range(len(sorted_blocks)):
-        if i in skip: continue
-        # On fait une COPIE pour éviter de modifier l'objet original pendant l'itération
-        curr = dict(sorted_blocks[i])
-        content_up = curr['content'].upper()
-        
-        if any(key in content_up for key in anchor_keywords):
-            found_h = False
-            # Recherche HORIZONTALE (plus courte distance : 0.15 au lieu de balayer toute la ligne)
-            for j in range(i + 1, len(sorted_blocks)):
-                if j in skip: continue
-                cand = sorted_blocks[j]
-                
-                same_line = abs(curr['top'] - cand['top']) < 0.010
-                is_near_right = 0 < (cand['left'] - curr['right']) < 0.20
-                
-                if same_line and is_near_right:
-                    curr['content'] += f" : {cand['content']}"
-                    curr['right'] = max(curr['right'], cand['right'])
-                    skip.add(j)
-                    found_h = True
-                    break 
-
-        merged.append(curr)
-
     dcp_zones = {}
     patterns = {
         "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
-        "SIRET": r'\d{14}'
+        "SIRET": r'\d{14}',
+        "PHONE": r'(?:\+237|237)?\s*[2368]\s*[0-9](?:\s*[0-9]{2}){3}'
     }
 
-    for i, block in enumerate(merged):
+    for i, block in enumerate(blocks):
         content = block['content']
-        final_label = block['label_IA']
+        up_content = content.upper()
+        label = "BLOCK"
         is_sensitive = False
 
+        # Detection des types
         for d_name, p in patterns.items():
             if re.search(p, content):
-                final_label, is_sensitive = f"ZONE_{d_name}", True
-                break
+                label, is_sensitive = f"ZONE_{d_name}", True
         
-        if any(kw in content.upper() for kw in ["SARL", "SAS", "SCT"]):
-            final_label = "SOCIETE_EMETTEUR"
-        
-        if "CLIENT" in content.upper() or is_sensitive:
-            is_sensitive = True
+        if any(kw in up_content for kw in ["SARL", "SCT", "SOCIETE"]): label = "EMETTEUR"
+        if "CLIENT" in up_content: label, is_sensitive = "CLIENT_INFO", True
+        if any(kw in up_content for kw in ["FACTURE N°", "DATE", "ÉCHÉANCE"]): label = "HEADER"
 
-        if final_label != "O" or is_sensitive:
-            zone_key = f"{final_label}_{i}"
-            dcp_zones[zone_key] = {
-                "top": block['top'], "content": content, "is_sensitive": is_sensitive
+        # On ne garde que les zones pertinentes ou sensibles
+        if label != "BLOCK" or is_sensitive:
+            dcp_zones[f"{label}_{i}"] = {
+                "top": block['top'],
+                "bottom": block['bottom'],
+                "left": block['left'],
+                "right": block['right'],
+                "content": content,
+                "is_sensitive": is_sensitive
             }
 
     return dcp_zones
 
 # --- TEST ---
 try:
+    # Remplacez par votre fichier
     raw_blocks = process_invoice("facture_FAC-2025-00001_2.pdf")
     dcp_report = generate_dcp_report(raw_blocks)
     print(json.dumps(dcp_report, indent=4, ensure_ascii=False))
