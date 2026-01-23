@@ -3,6 +3,7 @@ from PIL import Image
 from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import torch
 import json
+import time
 
 processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 model = LayoutLMv3ForTokenClassification.from_pretrained("nielsr/layoutlmv3-finetuned-funsd")
@@ -112,4 +113,14 @@ def process_hybrid_invoice_v6(pdf_path):
         }
     return final_report
 
+debut = time.perf_counter()
 print(json.dumps(process_hybrid_invoice_v6("facture_FAC-2025-00001_2.pdf"), indent=4, ensure_ascii=False))
+fin = time.perf_counter()
+
+# 4. Calcul et affichage
+temps_total = fin - debut
+
+print("-" * 30)
+print(f"✅ Analyse terminée !")
+print(f"⏱️  Temps d'exécution : {temps_total:.3f} secondes")
+print("-" * 30)
