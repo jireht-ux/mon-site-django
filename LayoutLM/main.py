@@ -4,20 +4,18 @@ from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import torch
 import json
 
-# 1. Initialisation du modèle
+# 1. Initialisation
 processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 model = LayoutLMv3ForTokenClassification.from_pretrained("nielsr/layoutlmv3-finetuned-funsd")
 
-def process_hybrid_invoice_v5(pdf_path):
+def process_hybrid_invoice_final(pdf_path):
     doc = fitz.open(pdf_path)
-    if doc.page_count == 0: return {"error": "PDF vide"}
-    
     page = doc[0]
     page_w, page_h = page.rect.width, page.rect.height
     pix = page.get_pixmap()
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # 2. Extraction des segments physiques
+    # 2. Extraction des segments
     segments = []
     blocks_raw = page.get_text("dict")["blocks"]
     for b in blocks_raw:
@@ -33,7 +31,7 @@ def process_hybrid_invoice_v5(pdf_path):
                     "assigned": False
                 })
 
-    # 3. INTERVENTION DU MODÈLE IA
+    # 3. Prédiction LayoutLMv3
     words = [s["content"] for s in segments]
     boxes = [[max(0, min(1000, int(s["bbox"][0] * (1000/page_w)))),
               max(0, min(1000, int(s["bbox"][1] * (1000/page_h)))),
@@ -46,17 +44,15 @@ def process_hybrid_invoice_v5(pdf_path):
     
     predictions = outputs.logits.argmax(-1).squeeze().tolist()
     for i, p_idx in enumerate(predictions[:len(segments)]):
-        # On stocke le label prédit par l'IA (HEADER, QUESTION, ANSWER, etc.)
         segments[i]["label_ia"] = model.config.id2label[p_idx].replace("B-","").replace("I-","")
 
-    # 4. CLUSTERING ADAPTATIF (Basé sur les labels et la position)
+    # 4. Clustering Intelligent
     macro_clusters = []
     available_segments = sorted(segments, key=lambda x: (x["bbox"][1], x["bbox"][0]))
     
     while available_segments:
         current = available_segments.pop(0)
         cluster = [current]
-        current["assigned"] = True
         
         added = True
         while added:
@@ -68,19 +64,20 @@ def process_hybrid_invoice_v5(pdf_path):
                     v_gap = other["bbox"][1] - member["bbox"][3]
                     h_gap = max(0, other["bbox"][0] - member["bbox"][2], member["bbox"][0] - other["bbox"][2])
                     
-                    # LOGIQUE A : En-tête (HEADER) -> Priorité au regroupement VERTICAL
-                    if member["label_ia"] == "HEADER" or "FACTURE" in member["content"].upper():
-                        # Si aligné à gauche et juste en dessous (ex: FACTURE N° + FAC-2025)
-                        if abs(other["bbox"][0] - member["bbox"][0]) < 15 and v_gap < 12:
+                    content_all = (member["content"] + " " + other["content"]).upper()
+                    
+                    # RÈGLE 1 : Métadonnées En-tête (Date, Échéance) -> Fusion Verticale
+                    if any(k in content_all for k in ["DATE", "ÉCHÉANCE", "N°"]):
+                        if abs(other["bbox"][0] - member["bbox"][0]) < 20 and v_gap < 15:
                             is_close = True
                     
-                    # LOGIQUE B : Corps/Totaux (QUESTION/ANSWER) -> Priorité HORIZONTALE
-                    # Si c'est sur la même ligne (ex: Total TTC + 223.66)
-                    elif v_dist < 8 and h_gap < 100:
-                        is_close = True
+                    # RÈGLE 2 : Totaux (TVA, TTC, HT) -> Fusion Horizontale Large
+                    elif any(k in content_all for k in ["TVA", "TOTAL", "TTC", "HT"]):
+                        if v_dist < 10 and h_gap < 250: # On accepte un grand vide horizontal pour lier libellé et montant
+                            is_close = True
                     
-                    # LOGIQUE C : Bloc Adresse (Proximité générale)
-                    elif v_gap < 10 and h_gap < 50:
+                    # RÈGLE 3 : Blocs de texte standard (Adresses, etc.)
+                    elif v_gap < 12 and h_gap < 60:
                         is_close = True
 
                     if is_close: break
@@ -91,20 +88,18 @@ def process_hybrid_invoice_v5(pdf_path):
                     added = True
         macro_clusters.append(cluster)
 
-    # 5. Formatage du résultat attendu
+    # 5. Génération du rapport
     final_report = {}
     for idx, cluster in enumerate(macro_clusters):
-        sorted_cluster = sorted(cluster, key=lambda x: (round(x["bbox"][1]), x["bbox"][0]))
+        sorted_cluster = sorted(cluster, key=lambda x: (round(x["bbox"][1], 1), x["bbox"][0]))
         content = " ".join([c["content"] for c in sorted_cluster])
-        
-        # On prend le label le plus pertinent du groupe
-        labels = [c["label_ia"] for c in cluster if c["label_ia"] != "O"]
-        final_label = labels[0] if labels else "ZONE"
         
         b = [min(c["bbox"][0] for c in cluster), min(c["bbox"][1] for c in cluster),
              max(c["bbox"][2] for c in cluster), max(c["bbox"][3] for c in cluster)]
         
-        final_report[f"{final_label}_{idx}"] = {
+        label = cluster[0]["label_ia"] if cluster[0]["label_ia"] != "O" else "ZONE"
+        
+        final_report[f"{label}_{idx}"] = {
             "content": content,
             "top": round(b[1] / page_h, 3),
             "bottom": round(b[3] / page_h, 3),
@@ -114,5 +109,4 @@ def process_hybrid_invoice_v5(pdf_path):
         }
     return final_report
 
-# Test
-print(json.dumps(process_hybrid_invoice_v5("facture_2.pdf"), indent=4, ensure_ascii=False))
+print(json.dumps(process_hybrid_invoice_final("facture_2.pdf"), indent=4, ensure_ascii=False))
