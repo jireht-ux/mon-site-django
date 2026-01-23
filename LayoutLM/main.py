@@ -75,55 +75,57 @@ def process_invoice(pdf_path):
     return structured_blocks
 
 def generate_dcp_report(blocks):
-    """Fusionne libellés/valeurs puis identifie les zones sans fusionner tout le document."""
+    """Version avec Verrouillage de fusion pour éviter l'effet cascade."""
     if not blocks: return {}
 
     merged = []
     skip = set()
-    # Mots-clés qui appellent une valeur à côté ou en dessous
     anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT", "FACTURE"]
     
+    # Tri par Y (top) puis X (left)
     sorted_blocks = sorted(blocks, key=lambda b: (b['top'], b['left']))
 
-    # 1. PHASE DE FUSION BIDIRECTIONNELLE CIBLÉE
     for i in range(len(sorted_blocks)):
         if i in skip: continue
-        curr = sorted_blocks[i]
+        curr = sorted_blocks[i].copy() # On travaille sur une copie pour protéger l'original
         content_up = curr['content'].upper()
         
-        is_anchor = any(key in content_up for key in anchor_keywords)
-        
-        if is_anchor:
-            found_val = False
-            # A. RECHERCHE HORIZONTALE (Prioritaire)
+        # On ne tente de fusionner QUE si le bloc actuel est une ancre connue
+        if any(key in content_up for key in anchor_keywords):
+            target_idx = -1
+            
+            # --- PRIORITÉ 1 : HORIZONTALE ---
             for j in range(i + 1, len(sorted_blocks)):
                 if j in skip: continue
                 cand = sorted_blocks[j]
+                # Si sur la même ligne et à droite
                 if abs(curr['top'] - cand['top']) < 0.012 and cand['left'] > curr['left']:
-                    curr['content'] += f" : {cand['content']}"
-                    curr['right'] = max(curr['right'], cand['right'])
-                    skip.add(j)
-                    found_val = True
-                    break 
+                    target_idx = j
+                    break # On prend le PREMIER à droite et on s'arrête
             
-            # B. RECHERCHE VERTICALE (Si rien à droite)
-            if not found_val:
+            # --- PRIORITÉ 2 : VERTICALE (si rien trouvé à droite) ---
+            if target_idx == -1:
                 for j in range(i + 1, len(sorted_blocks)):
                     if j in skip: continue
                     cand = sorted_blocks[j]
-                    # Seuil vertical strict (3% de la page) pour éviter la fusion globale
-                    is_below = 0 <= (cand['top'] - curr['bottom']) < 0.035
+                    # Si juste en dessous et aligné (Seuil très serré : 3%)
+                    is_below = 0 <= (cand['top'] - curr['bottom']) < 0.03
                     is_aligned = abs(curr['left'] - cand['left']) < 0.08
                     if is_below and is_aligned:
-                        curr['content'] += f" : {cand['content']}"
-                        curr['bottom'] = max(curr['bottom'], cand['bottom'])
-                        curr['right'] = max(curr['right'], cand['right'])
-                        skip.add(j)
-                        break
+                        target_idx = j
+                        break # On prend le PREMIER en dessous et on s'arrête
+
+            # --- EXECUTION DE LA FUSION ---
+            if target_idx != -1:
+                target_block = sorted_blocks[target_idx]
+                curr['content'] += f" : {target_block['content']}"
+                curr['right'] = max(curr['right'], target_block['right'])
+                curr['bottom'] = max(curr['bottom'], target_block['bottom'])
+                skip.add(target_idx) # On marque le bloc trouvé comme utilisé
         
         merged.append(curr)
 
-    # 2. PHASE D'AUDIT (SANS macro-clustering pour éviter le bloc unique)
+    # 2. AUDIT FINAL DES DCP
     dcp_zones = {}
     patterns = {
         "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
@@ -137,14 +139,12 @@ def generate_dcp_report(blocks):
         final_label = block['label_IA']
         is_sensitive = False
 
-        # Detection par Patterns
         for d_name, p in patterns.items():
             if re.search(p, content):
                 final_label = f"ZONE_{d_name}"
                 is_sensitive = True
                 break
         
-        # Qualification sémantique
         up_content = content.upper()
         if any(kw in up_content for kw in ["SARL", "SAS", "ETABLISSEMENT"]):
             final_label = "SOCIETE_EMETTEUR"
@@ -152,7 +152,6 @@ def generate_dcp_report(blocks):
         if "CLIENT" in up_content or is_sensitive:
             is_sensitive = True
 
-        # On ne garde que les zones pertinentes
         if final_label != "O" or is_sensitive:
             zone_key = f"{final_label}_{i}"
             dcp_zones[zone_key] = {
@@ -162,7 +161,6 @@ def generate_dcp_report(blocks):
             }
 
     return dcp_zones
-
 # --- EXECUTION ---
 try:
     raw_blocks = process_invoice("facture_2.pdf")
