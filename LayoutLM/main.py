@@ -27,6 +27,7 @@ def process_invoice(pdf_path):
     
     raw_words_data = page.get_text("words")
     if not raw_words_data: return []
+    # Tri spatial initial : haut en bas, puis gauche à droite
     words_data = sorted(raw_words_data, key=lambda w: (w[1], w[0]))
     
     words = [w[4] for w in words_data]
@@ -77,48 +78,15 @@ def process_invoice(pdf_path):
 
     return structured_blocks
 
-def cluster_macro_zones(blocks, v_threshold=0.035, h_threshold=0.25):
-    """
-    Regroupe les blocs avec une sensibilité accrue pour éviter la fusion globale.
-    """
-    macro_zones = []
-    if not blocks: return []
-    
-    # Tri par axe vertical
-    sorted_blocks = sorted(blocks, key=lambda b: b['top'])
-    
-    current_zone = [sorted_blocks[0]]
-    
-    for i in range(1, len(sorted_blocks)):
-        prev = current_zone[-1]
-        curr = sorted_blocks[i]
-        
-        # 1. Calcul de l'écart vertical
-        dist_y = curr['top'] - prev['bottom']
-        
-        # 2. Calcul de l'écart horizontal entre les bords gauches
-        # Si le nouveau bloc fait un "saut" horizontal trop grand, c'est une nouvelle zone
-        dist_x = abs(curr['left'] - prev['left'])
-        
-        # LOGIQUE DE RUPTURE :
-        # On coupe si l'espace vertical est > 3.5% OU si l'écart horizontal est > 25%
-        if dist_y < v_threshold and dist_x < h_threshold:
-            current_zone.append(curr)
-        else:
-            macro_zones.append(current_zone)
-            current_zone = [curr]
-            
-    macro_zones.append(current_zone)
-    return macro_zones
-
 def generate_dcp_report(blocks):
-    """Analyse les blocs, fusionne les ancres, puis crée des macro-zones thématiques."""
+    """Fusionne libellés/valeurs avec priorité horizontale puis verticale."""
     if not blocks: return {}
 
-    # --- ÉTAPE 1 : FUSION DES ANCRES (LIAISON LIBELLÉ:VALEUR) ---
     merged = []
     skip = set()
     anchor_keywords = ["TOTAL", "TTC", "HT", "TVA", "N°", "DATE", "ÉCHÉANCE", "MONTANT", "FACTURE"]
+    
+    # Tri strict pour le balayage
     sorted_blocks = sorted(blocks, key=lambda b: (b['top'], b['left']))
 
     for i in range(len(sorted_blocks)):
@@ -127,36 +95,45 @@ def generate_dcp_report(blocks):
         content_up = curr['content'].upper()
         
         if any(key in content_up for key in anchor_keywords):
+            # Priorité 1 : Recherche HORIZONTALE
             found_h = False
             for j in range(i + 1, len(sorted_blocks)):
                 if j in skip: continue
                 cand = sorted_blocks[j]
-                if abs(curr['top'] - cand['top']) < 0.015 and cand['left'] > curr['left']:
+                
+                same_line = abs(curr['top'] - cand['top']) < 0.015
+                is_at_right = cand['left'] > curr['left']
+                
+                if same_line and is_at_right:
                     curr['content'] += f" : {cand['content']}"
                     curr['right'] = max(curr['right'], cand['right'])
                     skip.add(j)
                     found_h = True
                     break 
             
+            # Priorité 2 : Recherche VERTICALE (si rien trouvé à droite)
             if not found_h:
                 for j in range(i + 1, len(sorted_blocks)):
                     if j in skip: continue
                     cand = sorted_blocks[j]
+                    
+                    # Espace vertical max 4% et alignement horizontal par les centres
                     is_below = 0 <= (cand['top'] - curr['bottom']) < 0.04
                     curr_mid_x = (curr['left'] + curr['right']) / 2
                     cand_mid_x = (cand['left'] + cand['right']) / 2
-                    if is_below and abs(curr_mid_x - cand_mid_x) < 0.12:
+                    is_aligned = abs(curr_mid_x - cand_mid_x) < 0.12 # Tolérance centre
+                    
+                    if is_below and is_aligned:
                         curr['content'] += f" : {cand['content']}"
                         curr['bottom'] = max(curr['bottom'], cand['bottom'])
                         curr['right'] = max(curr['right'], cand['right'])
                         skip.add(j)
                         break
+        
         merged.append(curr)
 
-    # --- ÉTAPE 2 : CRÉATION DES MACRO-ZONES ---
-    macro_groups = cluster_macro_zones(merged)
-    
-    final_report = {}
+    # 2. Audit des DCP (Données Sensibles)
+    dcp_zones = {}
     patterns = {
         "EMAIL": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
         "PHONE": r'(?:\+237|237)?\s*[2368]\s*[0-9](?:\s*[0-9]{2}){3}',
@@ -164,48 +141,38 @@ def generate_dcp_report(blocks):
         "TVA_NUMBER": r'[A-Z]{2}\d{11}'
     }
 
-    for idx, group in enumerate(macro_groups):
-        # On compile tout le texte de la zone
-        full_zone_content = " | ".join([b['content'] for b in group])
-        
-        # Coordonnées de la Macro-Zone (Bounding Box englobante)
-        z_top = min(b['top'] for b in group)
-        z_bottom = max(b['bottom'] for b in group)
-        z_left = min(b['left'] for b in group)
-        z_right = max(b['right'] for b in group)
-        
-        # Qualification sémantique
-        zone_type = "GENERAL_INFO"
+    for i, block in enumerate(merged):
+        content = block['content']
+        final_label = block['label_IA']
         is_sensitive = False
-        
-        # Test de sensibilité
+
         for d_name, p in patterns.items():
-            if re.search(p, full_zone_content):
-                zone_type = f"MACRO_ZONE_{d_name}"
+            if re.search(p, content):
+                final_label = f"ZONE_{d_name}"
                 is_sensitive = True
+                break
         
-        if any(kw in full_zone_content.upper() for kw in ["CLIENT", "FACTURÉ À"]):
-            zone_type = "MACRO_ZONE_CLIENT"
+        if any(kw in content.upper() for kw in ["SARL", "SAS", "ETABLISSEMENT"]):
+            final_label = "SOCIETE_EMETTEUR"
+        
+        if "CLIENT" in content.upper() or is_sensitive:
             is_sensitive = True
-        elif any(kw in full_zone_content.upper() for kw in ["TOTAL", "TTC", "HT", "NET"]):
-            zone_type = "MACRO_ZONE_FINANCIAL"
-        elif any(kw in full_zone_content.upper() for kw in ["SARL", "SAS", "ETABLISSEMENT"]):
-            zone_type = "MACRO_ZONE_EMETTEUR"
 
-        final_report[f"ZONE_{idx}"] = {
-            "type": zone_type,
-            "coordinates": {"top": z_top, "bottom": z_bottom, "left": z_left, "right": z_right},
-            "is_sensitive": is_sensitive,
-            "content": full_zone_content,
-            "blocks_count": len(group)
-        }
+        if final_label != "O" or is_sensitive:
+            zone_key = f"{final_label}_{i}"
+            dcp_zones[zone_key] = {
+                "top": block['top'], "bottom": block['bottom'],
+                "left": block['left'], "right": block['right'],
+                "content": content, "is_sensitive": is_sensitive
+            }
 
-    return final_report
+    return dcp_zones
 
 # --- EXECUTION ---
 try:
+    # Remplacez par le nom de votre fichier
     raw_blocks = process_invoice("facture_2.pdf")
-    final_report = generate_dcp_report(raw_blocks)
-    print(json.dumps(final_report, indent=4, ensure_ascii=False))
+    dcp_report = generate_dcp_report(raw_blocks)
+    print(json.dumps(dcp_report, indent=4, ensure_ascii=False))
 except Exception as e:
     print(f"Erreur : {e}")
